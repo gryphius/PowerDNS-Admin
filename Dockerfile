@@ -32,7 +32,7 @@ RUN apt-get install -y libxml2-dev libxslt1-dev libxmlsec1-dev libffi-dev pkg-co
 
 
 ADD . /powerdns-admin/
-RUN pip3 install -r requirements.txt
+RUN pip3 install -r /powerdns-admin/requirements.txt
 
 ADD ./supervisord.conf /etc/supervisord.conf
 COPY ./configs/${ENVIRONMENT}.py /powerdns-admin/config.py
