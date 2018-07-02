@@ -14,6 +14,6 @@ else
 fi
 
 yarn install --pure-lockfile
-sudo -u www-data flask assets build
+sudo -E -u www-data flask assets build
 
 /usr/bin/supervisord -c /etc/supervisord.conf
