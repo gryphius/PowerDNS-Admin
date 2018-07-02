@@ -19,17 +19,7 @@ RUN echo "deb https://dl.yarnpkg.com/debian/ stable main" > /etc/apt/sources.lis
 
 # Install yarn
 RUN apt-get update -y
-RUN apt-get install -y yarn
-
-# lib for building mysql db driver
-RUN apt-get install -y libmysqlclient-dev
-
-# lib for buiding ldap and ssl-based application
-RUN apt-get install -y libsasl2-dev libldap2-dev libssl-dev
-
-# lib for building python3-saml
-RUN apt-get install -y libxml2-dev libxslt1-dev libxmlsec1-dev libffi-dev pkg-config 
-
+RUN apt-get install -y yarn libmysqlclient-dev libsasl2-dev libldap2-dev libssl-dev libxml2-dev libxslt1-dev libxmlsec1-dev libffi-dev pkg-config sudo
 
 ADD . /powerdns-admin/
 RUN pip3 install -r /powerdns-admin/requirements.txt
