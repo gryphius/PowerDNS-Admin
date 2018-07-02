@@ -1,6 +1,7 @@
 FROM ubuntu:18.04
 ENV ENVIRONMENT=development
 
+RUN mkdir -p /powerdns-admin
 WORKDIR /powerdns-admin
 
 RUN apt-get update -y
@@ -29,12 +30,12 @@ RUN apt-get install -y libsasl2-dev libldap2-dev libssl-dev
 # lib for building python3-saml
 RUN apt-get install -y libxml2-dev libxslt1-dev libxmlsec1-dev libffi-dev pkg-config 
 
-COPY ./requirements.txt /powerdns-admin/requirements.txt
+
+ADD . /powerdns-admin/
 RUN pip3 install -r requirements.txt
 
 ADD ./supervisord.conf /etc/supervisord.conf
-ADD . /powerdns-admin/
 COPY ./configs/${ENVIRONMENT}.py /powerdns-admin/config.py
-COPY ./docker/PowerDNS-Admin/entrypoint.sh /entrypoint.sh
+COPY ./entrypoint.sh /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
