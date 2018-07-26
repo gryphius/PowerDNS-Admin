@@ -5,7 +5,7 @@ basedir = os.path.abspath(os.path.dirname(__file__))
 WTF_CSRF_ENABLED = True
 SECRET_KEY = 'changeme'
 LOG_LEVEL = 'DEBUG'
-LOG_FILE = 'log.txt'
+LOG_FILE = 'logs/log.txt'
 
 # TIMEOUT - for large zones
 TIMEOUT = 10
@@ -111,7 +111,7 @@ PDNS_API_KEY = os.environ.get('PDNS_API_KEY')
 PDNS_VERSION = '4.1.1'
 
 # RECORDS ALLOWED TO EDIT
-RECORDS_ALLOW_EDIT = ['SOA', 'A', 'AAAA', 'CAA', 'CNAME', 'MX', 'PTR', 'SPF', 'SRV', 'TXT', 'LOC', 'NS', 'PTR']
+RECORDS_ALLOW_EDIT = ['A', 'AAAA', 'CAA', 'CNAME', 'MX', 'PTR', 'SPF', 'SRV', 'TXT', 'LOC', 'NS', 'PTR', 'SOA']
 FORWARD_RECORDS_ALLOW_EDIT = ['A', 'AAAA', 'CAA', 'CNAME', 'MX', 'PTR', 'SPF', 'SRV', 'TXT', 'LOC' 'NS']
 REVERSE_RECORDS_ALLOW_EDIT = ['SOA', 'TXT', 'LOC', 'NS', 'PTR']
 
