@@ -22,16 +22,17 @@ UPLOAD_DIR = os.path.join(basedir, 'upload')
 SQLA_DB_USER = 'pda'
 SQLA_DB_PASSWORD = 'changeme'
 SQLA_DB_HOST = '127.0.0.1'
+SQLA_DB_PORT = 3306
 SQLA_DB_NAME = 'pda'
 SQLALCHEMY_TRACK_MODIFICATIONS = True
 
-# DATBASE - MySQL
-SQLALCHEMY_DATABASE_URI = 'mysql://'+SQLA_DB_USER+':'+SQLA_DB_PASSWORD+'@'+SQLA_DB_HOST+'/'+SQLA_DB_NAME
+# DATABASE - MySQL
+SQLALCHEMY_DATABASE_URI = 'mysql://'+SQLA_DB_USER+':'+SQLA_DB_PASSWORD+'@'+SQLA_DB_HOST+':'+str(SQLA_DB_PORT)+'/'+SQLA_DB_NAME
 
-# DATABSE - SQLite
+# DATABASE - SQLite
 # SQLALCHEMY_DATABASE_URI = 'sqlite:///' + os.path.join(basedir, 'pdns.db')
 
-# SAML Authnetication
+# SAML Authentication
 SAML_ENABLED = False
 SAML_DEBUG = True
 SAML_PATH = os.path.join(os.path.dirname(__file__), 'saml')
@@ -93,10 +94,10 @@ SAML_ATTRIBUTE_ACCOUNT = 'https://example.edu/pdns-account'
 SAML_SP_ENTITY_ID = 'http://<SAML SP Entity ID>'
 SAML_SP_CONTACT_NAME = '<contact name>'
 SAML_SP_CONTACT_MAIL = '<contact mail>'
-#Cofigures if SAML tokens should be encrypted.
+#Configures if SAML tokens should be encrypted.
 #If enabled a new app certificate will be generated on restart
 SAML_SIGN_REQUEST = False
-#Use SAML standard logout mechanism retreived from idp metadata
+#Use SAML standard logout mechanism retrieved from idp metadata
 #If configured false don't care about SAML session on logout.
 #Logout from PowerDNS-Admin only and keep SAML session authenticated.
 SAML_LOGOUT = False

@@ -3,6 +3,8 @@ import logging as logger
 import os
 import traceback
 import re
+import datetime
+import json
 from distutils.util import strtobool
 from distutils.version import StrictVersion
 from functools import wraps
@@ -18,7 +20,7 @@ from werkzeug import secure_filename
 from .models import User, Account, Domain, Record, Role, Server, History, Anonymous, Setting, DomainSetting, DomainTemplate, DomainTemplateRecord
 from app import app, login_manager
 from app.lib import utils
-from app.oauth import github_oauth, google_oauth
+from app.oauth import github_oauth, google_oauth, oidc_oauth
 from app.decorators import admin_role_required, operator_role_required, can_access_domain, can_configure_dnssec, can_create_domain
 
 if app.config['SAML_ENABLED']:
@@ -52,8 +54,10 @@ def inject_setting():
 def register_modules():
     global google
     global github
+    global oidc
     google = google_oauth()
     github = github_oauth()
+    oidc = oidc_oauth()
 
 
 # START USER AUTHENTICATION HANDLER
@@ -68,6 +72,11 @@ def before_request():
     if maintenance and current_user.is_authenticated and current_user.role.name not in ['Administrator', 'Operator']:
         return render_template('maintenance.html')
 
+    # Manage session timeout
+    session.permanent = True
+    app.permanent_session_lifetime = datetime.timedelta(minutes=int(Setting().get('session_timeout')))
+    session.modified = True
+    g.user = current_user
 
 @login_manager.user_loader
 def load_user(id):
@@ -154,7 +163,8 @@ def google_login():
         logging.error('Google OAuth is disabled or you have not yet reloaded the pda application after enabling.')
         return abort(400)
     else:
-        return google.authorize(callback=url_for('google_authorized', _external=True))
+        redirect_uri = url_for('google_authorized', _external=True)
+        return google.authorize_redirect(redirect_uri)
 
 
 @app.route('/github/login')
@@ -163,8 +173,18 @@ def github_login():
         logging.error('Github OAuth is disabled or you have not yet reloaded the pda application after enabling.')
         return abort(400)
     else:
-        return github.authorize(callback=url_for('github_authorized', _external=True))
+        redirect_uri = url_for('github_authorized', _external=True)
+        return github.authorize_redirect(redirect_uri)
 
+@app.route('/oidc/login')
+def oidc_login():
+    if not Setting().get('oidc_oauth_enabled') or oidc is None:
+        logging.error('OIDC OAuth is disabled or you have not yet reloaded the pda application after enabling.')
+        return abort(400)
+    else:
+        redirect_uri = url_for('oidc_authorized', _external=True)
+        return oidc.authorize_redirect(redirect_uri)
+            
 
 @app.route('/saml/login')
 def saml_login():
@@ -288,11 +308,13 @@ def login():
         return redirect(url_for('dashboard'))
 
     if 'google_token' in session:
-        user_data = google.get('userinfo').data
+        user_data = json.loads(google.get('userinfo').text)
         first_name = user_data['given_name']
         surname = user_data['family_name']
         email = user_data['email']
         user = User.query.filter_by(username=email).first()
+        if user is None:
+            user = User.query.filter_by(email=email).first()
         if not user:
             user = User(username=email,
                         firstname=first_name,
@@ -311,13 +333,14 @@ def login():
         return redirect(url_for('index'))
 
     if 'github_token' in session:
-        me = github.get('user').data
-
+        me = json.loads(github.get('user').text)
         github_username = me['login']
         github_name = me['name']
         github_email = me['email']
 
         user = User.query.filter_by(username=github_username).first()
+        if user is None:
+            user = User.query.filter_by(email=github_email).first()
         if not user:
             user = User(username=github_username,
                         plain_text_password=None,
@@ -328,6 +351,31 @@ def login():
             result = user.create_local_user()
             if not result['status']:
                 session.pop('github_token', None)
+                return redirect(url_for('login'))
+
+        session['user_id'] = user.id
+        session['authentication_type'] = 'OAuth'
+        login_user(user, remember = False)
+        return redirect(url_for('index'))
+
+    if 'oidc_token' in session:
+        me = json.loads(oidc.get('userinfo').text)
+        oidc_username = me["preferred_username"]
+        oidc_givenname = me["name"]
+        oidc_familyname = ""
+        oidc_email = me["email"]
+
+        user = User.query.filter_by(username=oidc_username).first()
+        if not user:
+            user = User(username=oidc_username,
+                        plain_text_password=None,
+                        firstname=oidc_givenname,
+                        lastname=oidc_familyname,
+                        email=oidc_email)
+
+            result = user.create_local_user()
+            if not result['status']:
+                session.pop('oidc_token', None)
                 return redirect(url_for('login'))
 
         session['user_id'] = user.id
@@ -552,7 +600,7 @@ def dashboard_domains_updater():
     return jsonify(response_data)
 
 
-@app.route('/domain/<path:domain_name>', methods=['GET', 'POST'])
+@app.route('/domain/<path:domain_name>', methods=['GET'])
 @login_required
 @can_access_domain
 def domain(domain_name):
@@ -689,7 +737,7 @@ def domain_management(domain_name):
         users = User.query.all()
         accounts = Account.query.all()
 
-        # get list of user ids to initilize selection data
+        # get list of user ids to initialize selection data
         d = Domain(name=domain_name)
         domain_user_ids = d.get_user()
         account = d.get_account()
@@ -700,7 +748,7 @@ def domain_management(domain_name):
         # username in right column
         new_user_list = request.form.getlist('domain_multi_user[]')
 
-        # grant/revoke user privielges
+        # grant/revoke user privileges
         d = Domain(name=domain_name)
         d.grant_privileges(new_user_list)
 
@@ -787,7 +835,7 @@ def record_apply(domain_name):
         else:
             return make_response(jsonify( result ), 400)
     except Exception as e:
-        logging.error('Canot apply record changes. Error: {0}'.format(e))
+        logging.error('Cannot apply record changes. Error: {0}'.format(e))
         logging.debug(traceback.format_exc())
         return make_response(jsonify( {'status': 'error', 'msg': 'Error when applying new changes'} ), 500)
 
@@ -1198,13 +1246,13 @@ def admin_manageuser():
                 else:
                     return make_response(jsonify( { 'status': 'error', 'msg': 'Cannot remove user.' } ), 500)
 
-            elif jdata['action'] == 'revoke_user_privielges':
+            elif jdata['action'] == 'revoke_user_privileges':
                 user = User(username=data)
                 result = user.revoke_privilege()
                 if result:
-                    history = History(msg='Revoke {0} user privielges'.format(data), created_by=current_user.username)
+                    history = History(msg='Revoke {0} user privileges'.format(data), created_by=current_user.username)
                     history.add()
-                    return make_response(jsonify( { 'status': 'ok', 'msg': 'Revoked user privielges.' } ), 200)
+                    return make_response(jsonify( { 'status': 'ok', 'msg': 'Revoked user privileges.' } ), 200)
                 else:
                     return make_response(jsonify( { 'status': 'error', 'msg': 'Cannot revoke user privilege.' } ), 500)
 
@@ -1369,7 +1417,8 @@ def admin_setting_basic():
                     'dnssec_admins_only',
                     'allow_user_create_domain',
                     'bg_domain_updates',
-                    'site_name'] 
+                    'site_name',
+                    'session_timeout' ] 
 
         return render_template('admin_setting_basic.html', settings=settings)
 
@@ -1482,13 +1531,14 @@ def admin_setting_authentication():
                 Setting().set('ldap_admin_group', request.form.get('ldap_admin_group'))
                 Setting().set('ldap_operator_group', request.form.get('ldap_operator_group'))
                 Setting().set('ldap_user_group', request.form.get('ldap_user_group'))
+                Setting().set('ldap_domain', request.form.get('ldap_domain'))
                 result = {'status': True, 'msg': 'Saved successfully'}
         elif conf_type == 'google':
             Setting().set('google_oauth_enabled', True if request.form.get('google_oauth_enabled') else False)
             Setting().set('google_oauth_client_id', request.form.get('google_oauth_client_id'))
             Setting().set('google_oauth_client_secret', request.form.get('google_oauth_client_secret'))
             Setting().set('google_token_url', request.form.get('google_token_url'))
-            Setting().set('google_token_params', request.form.get('google_token_params'))
+            Setting().set('google_oauth_scope', request.form.get('google_oauth_scope'))
             Setting().set('google_authorize_url', request.form.get('google_authorize_url'))
             Setting().set('google_base_url', request.form.get('google_base_url'))
             result = {'status': True, 'msg': 'Saved successfully. Please reload PDA to take effect.'}
@@ -1500,6 +1550,15 @@ def admin_setting_authentication():
             Setting().set('github_oauth_api_url', request.form.get('github_oauth_api_url'))
             Setting().set('github_oauth_token_url', request.form.get('github_oauth_token_url'))
             Setting().set('github_oauth_authorize_url', request.form.get('github_oauth_authorize_url'))
+            result = {'status': True, 'msg': 'Saved successfully. Please reload PDA to take effect.'}
+        elif conf_type == 'oidc':
+            Setting().set('oidc_oauth_enabled', True if request.form.get('oidc_oauth_enabled') else False)
+            Setting().set('oidc_oauth_key', request.form.get('oidc_oauth_key'))
+            Setting().set('oidc_oauth_secret', request.form.get('oidc_oauth_secret'))
+            Setting().set('oidc_oauth_scope', request.form.get('oidc_oauth_scope'))
+            Setting().set('oidc_oauth_api_url', request.form.get('oidc_oauth_api_url'))
+            Setting().set('oidc_oauth_token_url', request.form.get('oidc_oauth_token_url'))
+            Setting().set('oidc_oauth_authorize_url', request.form.get('oidc_oauth_authorize_url'))
             result = {'status': True, 'msg': 'Saved successfully. Please reload PDA to take effect.'}
         else:
             return abort(400)
@@ -1568,7 +1627,7 @@ def qrcode():
         return redirect(url_for('index'))
 
     # render qrcode for FreeTOTP
-    img = qrc.make(current_user.get_totp_uri(), image_factory=qrc_svg.SvgImage)
+    img = qrc.make(current_user.get_totp_uri(), image_factory=qrc_svg.SvgPathImage)
     stream = BytesIO()
     img.save(stream)
     return stream.getvalue(), 200, {
