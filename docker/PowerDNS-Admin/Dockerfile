@@ -1,4 +1,4 @@
-FROM ubuntu:latest
+FROM ubuntu:16.04
 MAINTAINER Khanh Ngo "k@ndk.name"
 ARG ENVIRONMENT=development
 ENV ENVIRONMENT=${ENVIRONMENT}
@@ -13,7 +13,7 @@ ENV LC_ALL en_US.UTF-8
 ENV LANG en_US.UTF-8
 ENV LANGUAGE en_US.UTF-8
 
-RUN apt-get install -y python3-pip python3-dev supervisor curl
+RUN apt-get install -y python3-pip python3-dev supervisor curl mysql-client
 
 RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -
 RUN echo "deb https://dl.yarnpkg.com/debian/ stable main" > /etc/apt/sources.list.d/yarn.list
@@ -28,7 +28,7 @@ RUN apt-get install -y netcat
 # lib for building mysql db driver
 RUN apt-get install -y libmysqlclient-dev
 
-# lib for buiding ldap and ssl-based application
+# lib for building ldap and ssl-based application
 RUN apt-get install -y libsasl2-dev libldap2-dev libssl-dev
 
 # lib for building python3-saml

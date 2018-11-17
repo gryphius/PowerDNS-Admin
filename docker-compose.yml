@@ -34,6 +34,7 @@ services:
       - PDA_DB_NAME=${PDA_DB_NAME}
       - PDA_DB_USER=${PDA_DB_USER}
       - PDA_DB_PASSWORD=${PDA_DB_PASSWORD}
+      - PDA_DB_PORT=${PDA_DB_PORT}
       - PDNS_HOST=${PDNS_HOST}
       - PDNS_API_KEY=${PDNS_API_KEY}
       - FLASK_APP=/powerdns-admin/app/__init__.py
@@ -67,6 +68,7 @@ services:
     hostname: ${PDNS_HOST}
     ports:
       - "53:53"
+      - "53:53/udp"
     networks:
       - default
     command: --api=yes --api-key=${PDNS_API_KEY} --webserver-address=0.0.0.0 --webserver-allow-from=0.0.0.0/0
