@@ -90,7 +90,7 @@ class User(db.Model):
 
     def verify_totp(self, token):
         totp = pyotp.TOTP(self.otp_secret)
-        return totp.verify(int(token))
+        return totp.verify(token)
 
     def get_hashed_password(self, plain_text_password=None):
         # Hash a password for the first time
@@ -102,7 +102,7 @@ class User(db.Model):
         return bcrypt.hashpw(pw.encode('utf-8'), bcrypt.gensalt())
 
     def check_password(self, hashed_password):
-        # Check hased password. Useing bcrypt, the salt is saved into the hash itself
+        # Check hased password. Using bcrypt, the salt is saved into the hash itself
         if (self.plain_text_password):
             return bcrypt.checkpw(self.plain_text_password.encode('utf-8'), hashed_password.encode('utf-8'))
         return False
@@ -132,7 +132,10 @@ class User(db.Model):
 
         try:
             conn = self.ldap_init_conn()
-            conn.simple_bind_s(Setting().get('ldap_admin_username'), Setting().get('ldap_admin_password'))
+            if Setting().get('ldap_type') == 'ad':
+                conn.simple_bind_s("{0}@{1}".format(self.username,Setting().get('ldap_domain')), self.password)
+            else:
+                conn.simple_bind_s(Setting().get('ldap_admin_username'), Setting().get('ldap_admin_password'))
             ldap_result_id = conn.search(baseDN, searchScope, searchFilter, retrieveAttributes)
             result_set = []
 
@@ -159,6 +162,26 @@ class User(db.Model):
         except ldap.LDAPError as e:
             logging.error(e)
             return False
+
+    def ad_recursive_groups(self, groupDN):
+        """
+        Recursively list groups belonging to a group. It will allow checking deep in the Active Directory 
+        whether a user is allowed to enter or not
+        """
+        LDAP_BASE_DN = Setting().get('ldap_base_dn')
+        groupSearchFilter =  "(&(objectcategory=group)(member=%s))" % groupDN
+        result=[ groupDN ]
+        try:
+            groups = self.ldap_search(groupSearchFilter, LDAP_BASE_DN)
+            for group in groups:
+                result += [ group[0][0] ]
+                if 'memberOf' in group[0][1]:
+                    for member in group[0][1]['memberOf']:
+                        result += self.ad_recursive_groups( member.decode("utf-8") )
+            return result
+        except ldap.LDAPError as e:
+            logging.exception("Recursive AD Group search error")
+            return result
 
     def is_validate(self, method, src_ip=''):
         """
@@ -189,6 +212,13 @@ class User(db.Model):
             LDAP_USER_GROUP = Setting().get('ldap_user_group')
             LDAP_GROUP_SECURITY_ENABLED = Setting().get('ldap_sg_enabled')
 
+            # validate AD user password
+            if Setting().get('ldap_type') == 'ad':
+                ldap_username = "{0}@{1}".format(self.username,Setting().get('ldap_domain'))
+                if not self.ldap_auth(ldap_username, self.password):
+                    logging.error('User "{0}" input a wrong LDAP password. Authentication request from {1}'.format(self.username, src_ip))
+                    return False
+
             searchFilter = "(&({0}={1}){2})".format(LDAP_FILTER_USERNAME, self.username, LDAP_FILTER_BASIC)
             logging.debug('Ldap searchFilter {0}'.format(searchFilter))
 
@@ -201,6 +231,13 @@ class User(db.Model):
             else:
                 try:
                     ldap_username = ldap.filter.escape_filter_chars(ldap_result[0][0][0])
+
+                    if Setting().get('ldap_type') != 'ad':
+                        # validate ldap user password
+                        if not self.ldap_auth(ldap_username, self.password):
+                            logging.error('User "{0}" input a wrong LDAP password. Authentication request from {1}'.format(self.username, src_ip))
+                            return False
+
                     # check if LDAP_GROUP_SECURITY_ENABLED is True
                     # user can be assigned to ADMIN or USER role.
                     if LDAP_GROUP_SECURITY_ENABLED:
@@ -218,8 +255,15 @@ class User(db.Model):
                                     logging.error('User {0} is not part of the "{1}", "{2}" or "{3}" groups that allow access to PowerDNS-Admin'.format(self.username, LDAP_ADMIN_GROUP, LDAP_OPERATOR_GROUP, LDAP_USER_GROUP))
                                     return False
                             elif LDAP_TYPE == 'ad':
-                                user_ldap_groups = [g.decode("utf-8") for g in ldap_result[0][0][1]['memberOf']]
-                                logging.debug('user_ldap_groups: {0}'.format(user_ldap_groups))
+                                user_ldap_groups = []
+                                user_ad_member_of = ldap_result[0][0][1].get('memberOf')
+
+                                if not user_ad_member_of:
+                                    logging.error('User {0} does not belong to any group while LDAP_GROUP_SECURITY_ENABLED is ON'.format(self.username))
+                                    return False
+
+                                for group in [g.decode("utf-8") for g in user_ad_member_of]:
+                                    user_ldap_groups += self.ad_recursive_groups( group )
 
                                 if (LDAP_ADMIN_GROUP in user_ldap_groups):
                                     role_name = 'Administrator'
@@ -239,11 +283,6 @@ class User(db.Model):
                             logging.error('LDAP group lookup for user "{0}" has failed. Authentication request from {1}'.format(self.username, src_ip))
                             logging.debug(traceback.format_exc())
                             return False
-
-                    # validate ldap user password
-                    if not self.ldap_auth(ldap_username, self.password):
-                        logging.error('User "{0}" input a wrong LDAP password. Authentication request from {1}'.format(self.username, src_ip))
-                        return False
 
                 except Exception as e:
                     logging.error('Wrong LDAP configuration. {0}'.format(e))
@@ -440,7 +479,7 @@ class User(db.Model):
 
     def revoke_privilege(self):
         """
-        Revoke all privielges from a user
+        Revoke all privileges from a user
         """
         user = User.query.filter(User.username == self.username).first()
 
@@ -452,7 +491,7 @@ class User(db.Model):
                 return True
             except Exception as e:
                 db.session.rollback()
-                logging.error('Cannot revoke user {0} privielges. DETAIL: {1}'.format(self.username, e))
+                logging.error('Cannot revoke user {0} privileges. DETAIL: {1}'.format(self.username, e))
                 return False
         return False
 
@@ -603,7 +642,7 @@ class Account(db.Model):
                 db.session.commit()
         except Exception as e:
             db.session.rollback()
-            logging.error('Cannot revoke user privielges on account {0}. DETAIL: {1}'.format(self.name, e))
+            logging.error('Cannot revoke user privileges on account {0}. DETAIL: {1}'.format(self.name, e))
 
         try:
             for uid in added_ids:
@@ -616,7 +655,7 @@ class Account(db.Model):
 
     def revoke_privileges_by_id(self, user_id):
         """
-        Remove a single user from prigilege list based on user_id
+        Remove a single user from privilege list based on user_id
         """
         new_uids = [u for u in self.get_user() if u != user_id]
         users = []
@@ -635,7 +674,7 @@ class Account(db.Model):
             return True
         except Exception as e:
             db.session.rollback()
-            logging.error('Cannot add user privielges on account {0}. DETAIL: {1}'.format(self.name, e))
+            logging.error('Cannot add user privileges on account {0}. DETAIL: {1}'.format(self.name, e))
             return False
 
     def remove_user(self, user):
@@ -648,7 +687,7 @@ class Account(db.Model):
             return True
         except Exception as e:
             db.session.rollback()
-            logging.error('Cannot revoke user privielges on account {0}. DETAIL: {1}'.format(self.name, e))
+            logging.error('Cannot revoke user privileges on account {0}. DETAIL: {1}'.format(self.name, e))
             return False
 
 
@@ -972,7 +1011,7 @@ class Domain(db.Model):
             if 0 != len(domain_users):
                 self.name = domain_reverse_name
                 self.grant_privileges(domain_users)
-                return {'status': 'ok', 'msg': 'New reverse lookup domain created with granted privilages'}
+                return {'status': 'ok', 'msg': 'New reverse lookup domain created with granted privileges'}
             return {'status': 'ok', 'msg': 'New reverse lookup domain created without users'}
         return {'status': 'ok', 'msg': 'Reverse lookup domain already exists'}
 
@@ -1037,7 +1076,7 @@ class Domain(db.Model):
                 db.session.commit()
         except Exception as e:
             db.session.rollback()
-            logging.error('Cannot revoke user privielges on domain {0}. DETAIL: {1}'.format(self.name, e))
+            logging.error('Cannot revoke user privileges on domain {0}. DETAIL: {1}'.format(self.name, e))
 
         try:
             for uid in added_ids:
@@ -1046,7 +1085,7 @@ class Domain(db.Model):
                 db.session.commit()
         except Exception as e:
             db.session.rollback()
-            logging.error('Cannot grant user privielges to domain {0}. DETAIL: {1}'.format(self.name, e))
+            logging.error('Cannot grant user privileges to domain {0}. DETAIL: {1}'.format(self.name, e))
 
     def update_from_master(self, domain_name):
         """
@@ -1808,6 +1847,7 @@ class Setting(db.Model):
         'allow_user_create_domain': False,
         'bg_domain_updates': False,
         'site_name': 'PowerDNS-Admin',
+        'session_timeout': 10,
         'pdns_api_url': '',
         'pdns_api_key': '',
         'pdns_version': '4.1.1',
@@ -1825,6 +1865,7 @@ class Setting(db.Model):
         'ldap_admin_group': '',
         'ldap_operator_group': '',
         'ldap_user_group': '',
+        'ldap_domain': '',
         'github_oauth_enabled': False,
         'github_oauth_key': '',
         'github_oauth_secret': '',
@@ -1835,10 +1876,17 @@ class Setting(db.Model):
         'google_oauth_enabled': False,
         'google_oauth_client_id':'',
         'google_oauth_client_secret':'',
-        'google_token_url': 'https://accounts.google.com/o/oauth2/token',
-        'google_token_params': {'scope': 'email profile'},
-        'google_authorize_url':'https://accounts.google.com/o/oauth2/auth',
-        'google_base_url':'https://www.googleapis.com/oauth2/v1/',
+        'google_token_url': 'https://oauth2.googleapis.com/token',
+        'google_oauth_scope': 'openid email profile',
+        'google_authorize_url':'https://accounts.google.com/o/oauth2/v2/auth',
+        'google_base_url':'https://www.googleapis.com/oauth2/v3/',
+        'oidc_oauth_enabled': False,
+        'oidc_oauth_key': '',
+        'oidc_oauth_secret': '',
+        'oidc_oauth_scope': 'email',
+        'oidc_oauth_api_url': '',
+        'oidc_oauth_token_url': '',
+        'oidc_oauth_authorize_url': '',
         'forward_records_allow_edit': {'A': True, 'AAAA': True, 'AFSDB': False, 'ALIAS': False, 'CAA': True, 'CERT': False, 'CDNSKEY': False, 'CDS': False, 'CNAME': True, 'DNSKEY': False, 'DNAME': False, 'DS': False, 'HINFO': False, 'KEY': False, 'LOC': True, 'MX': True, 'NAPTR': False, 'NS': True, 'NSEC': False, 'NSEC3': False, 'NSEC3PARAM': False, 'OPENPGPKEY': False, 'PTR': True, 'RP': False, 'RRSIG': False, 'SOA': False, 'SPF': True, 'SSHFP': False, 'SRV': True, 'TKEY': False, 'TSIG': False, 'TLSA': False, 'SMIMEA': False, 'TXT': True, 'URI': False},
         'reverse_records_allow_edit': {'A': False, 'AAAA': False, 'AFSDB': False, 'ALIAS': False, 'CAA': False, 'CERT': False, 'CDNSKEY': False, 'CDS': False, 'CNAME': False, 'DNSKEY': False, 'DNAME': False, 'DS': False, 'HINFO': False, 'KEY': False, 'LOC': True, 'MX': False, 'NAPTR': False, 'NS': True, 'NSEC': False, 'NSEC3': False, 'NSEC3PARAM': False, 'OPENPGPKEY': False, 'PTR': True, 'RP': False, 'RRSIG': False, 'SOA': False, 'SPF': False, 'SSHFP': False, 'SRV': False, 'TKEY': False, 'TSIG': False, 'TLSA': False, 'SMIMEA': False, 'TXT': True, 'URI': False},
     }
