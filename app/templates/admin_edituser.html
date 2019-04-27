@@ -28,6 +28,7 @@
             <!-- /.box-header -->
             <!-- form start -->
             <form role="form" method="post" action="{% if create %}{{ url_for('admin_edituser') }}{% else %}{{ url_for('admin_edituser', user_username=user.username) }}{% endif %}">
+                <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="create" value="{{ create }}">
                 <div class="box-body">
                     {% if error %}
@@ -41,26 +42,26 @@
                     <div class="form-group has-feedback">
                         <label class="control-label" for="firstname">First Name</label>
                         <input type="text" class="form-control" placeholder="First Name"
-                            name="firstname" {% if user %}value={{ user.firstname }}{% endif %}> <span
+                            name="firstname" {% if user %}value="{{ user.firstname }}"{% endif %}> <span
                             class="glyphicon glyphicon-user form-control-feedback"></span>
                     </div>
                     <div class="form-group has-feedback">
                         <label class="control-label" for="lastname">Last Name</label>
                         <input type="text" class="form-control" placeholder="Last name"
-                            name="lastname" {% if user %}value={{ user.lastname }}{% endif %}> <span
+                            name="lastname" {% if user %}value="{{ user.lastname }}"{% endif %}> <span
                             class="glyphicon glyphicon-user form-control-feedback"></span>
                     </div>
                     <div class="form-group has-feedback">
                         <label class="control-label" for="email">E-mail address</label>
                         <input type="email" class="form-control" placeholder="Email"
-                            name="email" id="email" {% if user %}value={{ user.email }}{% endif %}> <span
+                            name="email" id="email" {% if user %}value="{{ user.email }}"{% endif %}> <span
                             class="glyphicon glyphicon-envelope form-control-feedback"></span>
                     </div>
                     <p class="login-box-msg">Enter the account details below</p>
                     <div class="form-group has-feedback">
                         <label class="control-label" for="username">Username</label>
                         <input type="text" class="form-control" placeholder="Username"
-                            name="username" {% if user %}value={{ user.username }}{% endif %} {% if not create %}disabled{% endif %}> <span
+                            name="username" {% if user %}value="{{ user.username }}"{% endif %} {% if not create %}disabled{% endif %}> <span
                             class="glyphicon glyphicon-user form-control-feedback"></span>
                     </div>
                     <div class="form-group has-feedback {% if blank_password %}has-error{% endif %}">
@@ -115,14 +116,14 @@
 {% endblock %}
 {% block extrascripts %}
 <script>
-    // handle disabling two factor authentication 
+    // handle disabling two factor authentication
     $(document.body).on('click', '.button_otp_disable', function() {
         var modal = $("#modal_otp_disable");
         var username = $(this).prop('id');
-        var info = "Are you sure you want to disable two factor authentication for user " + username + "?"; 
+        var info = "Are you sure you want to disable two factor authentication for user " + username + "?";
         modal.find('.modal-body p').text(info);
         modal.find('#button_otp_disable_confirm').click(function() {
-            var postdata = {'action': 'user_otp_disable', 'data': username}
+            var postdata = {'action': 'user_otp_disable', 'data': username, '_csrf_token': '{{ csrf_token() }}'}
             applyChanges(postdata, $SCRIPT_ROOT + '/admin/manageuser', false, true);
         })
         modal.modal('show');

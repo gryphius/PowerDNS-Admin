@@ -48,7 +48,7 @@
                         </thead>
                         <tbody>
                                 {% for record in records %}
-                                <tr class="odd row_record" id="{{ record.name }}">
+                                <tr class="odd row_record">
                                     <td>
                                         {{ record.name }}
                                     </td>
@@ -65,12 +65,12 @@
                                          {{ record.data }}
                                     </td>
                                     <td width="6%">
-                                         <button type="button" class="btn btn-flat btn-warning button_edit" id="{{ record.name }}">
+                                         <button type="button" class="btn btn-flat btn-warning button_edit">
                                             Edit&nbsp;<i class="fa fa-edit"></i>
                                         </button>
                                     </td>
                                     <td width="6%">
-                                        <button type="button" class="btn btn-flat btn-danger button_delete" id="{{ record.name }}">
+                                        <button type="button" class="btn btn-flat btn-danger button_delete">
                                             Delete&nbsp;<i class="fa fa-trash"></i>
                                         </button>
                                     </td>
@@ -92,6 +92,7 @@
 <script>
     // superglobals
     window.records_allow_edit = {{ editable_records|tojson }};
+    window.ttl_options = {{ ttl_options|tojson }};
     window.nEditing = null;
     window.nNew = false;
 
@@ -103,7 +104,7 @@
         "ordering" : true,
         "info" : true,
         "autoWidth" : false,
-        {% if SETTING.get('default_record_table_size') in ['5','15','20'] %}
+        {% if SETTING.get('default_record_table_size')|string in ['5','15','20'] %}
         "lengthMenu": [ [5, 15, 20, -1],
                         [5, 15, 20, "All"]],
         {% else %}
@@ -186,6 +187,13 @@
 
     // handle apply changes button
     $(document.body).on("click",".button_apply_changes", function() {
+        if (nNew || nEditing) {
+            var modal = $("#modal_error");
+            modal.find('.modal-body p').text("Previous record not saved. Please save it before applying the changes.");
+            modal.modal('show');
+            return;
+        }
+
         var modal = $("#modal_apply_changes");
         var table = $("#tbl_records").DataTable();
         var template = $(this).prop('id');
@@ -195,7 +203,7 @@
         // following unbind("click") is to avoid multiple times execution
         modal.find('#button_apply_confirm').unbind("click").click(function() {
             var data = getTableData(table);
-            applyChanges(data, '/template/' + template + '/apply', true);
+            applyChanges( {'_csrf_token': '{{ csrf_token() }}', 'records': data}, $SCRIPT_ROOT + '/template/' + template + '/apply', true);
             modal.modal('hide');
         })
         modal.modal('show');
@@ -354,7 +362,7 @@
                                     <label for=\"soa_failedzonerefresh\">Failed refresh retry timer</label> \
                                     <input type=\"text\" class=\"form-control\" name=\"soa_failedzonerefresh\" id=\"soa_failedzonerefresh\" placeholder=\"7200\"> \
                                     <label for=\"soa_zoneexpiry\">Zone expiry timer</label> \
-                                    <input type=\"text\" class=\"form-control\" name=\"soa_zoneexpiry\" id=\"soa_zoneexpiry\" placeholder=\"604800\"> \
+                                    <input type=\"text\" class=\"form-control\" name=\"soa_zoneexpiry\" id=\"soa_zoneexpiry\" placeholder=\"1209600\"> \
                                     <label for=\"soa_minimumttl\">Minimum TTL</label> \
                                     <input type=\"text\" class=\"form-control\" name=\"soa_minimumttl\" id=\"soa_minimumttl\" placeholder=\"300\"> \
                                 ";

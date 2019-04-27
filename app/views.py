@@ -5,6 +5,7 @@ import traceback
 import re
 import datetime
 import json
+import ipaddress
 from distutils.util import strtobool
 from distutils.version import StrictVersion
 from functools import wraps
@@ -17,11 +18,12 @@ from flask import g, request, make_response, jsonify, render_template, session, 
 from flask_login import login_user, logout_user, current_user, login_required
 from werkzeug import secure_filename
 
-from .models import User, Account, Domain, Record, Role, Server, History, Anonymous, Setting, DomainSetting, DomainTemplate, DomainTemplateRecord
-from app import app, login_manager
+from .models import User, Account, AccountUser, Domain, Record, RecordEntry, Role, Server, History, Anonymous, Setting, DomainSetting, DomainTemplate, DomainTemplateRecord
+from app import app, login_manager, csrf
 from app.lib import utils
 from app.oauth import github_oauth, google_oauth, oidc_oauth
 from app.decorators import admin_role_required, operator_role_required, can_access_domain, can_configure_dnssec, can_create_domain
+from yaml import Loader, load
 
 if app.config['SAML_ENABLED']:
     from onelogin.saml2.utils import OneLogin_Saml2_Utils
@@ -106,7 +108,9 @@ def login_via_authorization_header(request):
             return None
         user = User(username=username, password=password, plain_text_password=password)
         try:
-            auth = user.is_validate(method='LOCAL', src_ip=request.remote_addr)
+            auth_method = request.args.get('auth_method', 'LOCAL')
+            auth_method = 'LDAP' if auth_method != 'LOCAL' else 'LOCAL'
+            auth = user.is_validate(method=auth_method, src_ip=request.remote_addr)
             if auth == False:
                 return None
             else:
@@ -129,11 +133,13 @@ def http_bad_request(e):
 def http_unauthorized(e):
     return redirect(url_for('error', code=401))
 
-
 @app.errorhandler(404)
-def http_internal_server_error(e):
-    return redirect(url_for('error', code=404))
-
+@app.errorhandler(405)
+def _handle_api_error(ex):
+    if request.path.startswith('/api/'):
+        return json.dumps({"msg": "NotFound"}), 404
+    else:
+        return redirect(url_for('error', code=404))
 
 @app.errorhandler(500)
 def http_page_not_found(e):
@@ -148,11 +154,52 @@ def error(code, msg=None):
     else:
         return render_template('errors/404.html'), 404
 
+@app.route('/swagger', methods=['GET'])
+def swagger_spec():
+    try:
+        dir_path = os.path.dirname(os.path.abspath(__file__))
+        spec_path = os.path.join(dir_path, "swagger-spec.yaml")
+        spec = open(spec_path,'r')
+        loaded_spec = load(spec.read(), Loader)
+    except Exception as e:
+        logging.error('Cannot view swagger spec. Error: {0}'.format(e))
+        logging.debug(traceback.format_exc())
+        return redirect(url_for('error', code=500))
 
-@app.route('/register', methods=['GET'])
+    resp = make_response(json.dumps(loaded_spec), 200)
+    resp.headers['Content-Type'] = 'application/json'
+
+    return resp
+
+@app.route('/register', methods=['GET', 'POST'])
 def register():
     if Setting().get('signup_enabled'):
-        return render_template('register.html')
+        if request.method == 'GET':
+            return render_template('register.html')
+        elif request.method == 'POST':
+            username = request.form['username']
+            password = request.form['password']
+            firstname = request.form.get('firstname')
+            lastname = request.form.get('lastname')
+            email = request.form.get('email')
+            rpassword = request.form.get('rpassword')
+
+            if not username or not password or not email:
+                return render_template('register.html', error='Please input required information')
+
+            if password != rpassword:
+                return render_template('register.html', error = "Password confirmation does not match")
+
+            user = User(username=username, plain_text_password=password, firstname=firstname, lastname=lastname, email=email)
+
+            try:
+                result = user.create_local_user()
+                if result and result['status']:
+                    return redirect(url_for('login'))
+                else:
+                    return render_template('register.html', error=result['msg'])
+            except Exception as e:
+                return render_template('register.html', error=e)
     else:
         return render_template('errors/404.html'), 404
 
@@ -184,7 +231,6 @@ def oidc_login():
     else:
         redirect_uri = url_for('oidc_authorized', _external=True)
         return oidc.authorize_redirect(redirect_uri)
-            
 
 @app.route('/saml/login')
 def saml_login():
@@ -215,6 +261,7 @@ def saml_metadata():
 
 
 @app.route('/saml/authorized', methods=['GET', 'POST'])
+@csrf.exempt
 def saml_authorized():
     errors = []
     if not app.config.get('SAML_ENABLED'):
@@ -246,27 +293,42 @@ def saml_authorized():
         email_attribute_name = app.config.get('SAML_ATTRIBUTE_EMAIL', 'email')
         givenname_attribute_name = app.config.get('SAML_ATTRIBUTE_GIVENNAME', 'givenname')
         surname_attribute_name = app.config.get('SAML_ATTRIBUTE_SURNAME', 'surname')
+        name_attribute_name = app.config.get('SAML_ATTRIBUTE_NAME', None)
         account_attribute_name = app.config.get('SAML_ATTRIBUTE_ACCOUNT', None)
         admin_attribute_name = app.config.get('SAML_ATTRIBUTE_ADMIN', None)
+        group_attribute_name = app.config.get('SAML_ATTRIBUTE_GROUP', None)
+        admin_group_name = app.config.get('SAML_GROUP_ADMIN_NAME', None)
+        group_to_account_mapping = create_group_to_account_mapping()
+
         if email_attribute_name in session['samlUserdata']:
             user.email = session['samlUserdata'][email_attribute_name][0].lower()
         if givenname_attribute_name in session['samlUserdata']:
             user.firstname = session['samlUserdata'][givenname_attribute_name][0]
         if surname_attribute_name in session['samlUserdata']:
             user.lastname = session['samlUserdata'][surname_attribute_name][0]
-        if admin_attribute_name:
+        if name_attribute_name in session['samlUserdata']:
+            name = session['samlUserdata'][name_attribute_name][0].split(' ')
+            user.firstname = name[0]
+            user.lastname = ' '.join(name[1:])
+
+        if group_attribute_name:
+            user_groups = session['samlUserdata'].get(group_attribute_name, [])
+        else:
+            user_groups = []
+        if admin_attribute_name or group_attribute_name:
             user_accounts = set(user.get_account())
             saml_accounts = []
+            for group_mapping in group_to_account_mapping:
+                mapping = group_mapping.split('=')
+                group = mapping[0]
+                account_name = mapping[1]
+
+                if group in user_groups:
+                    account = handle_account(account_name)
+                    saml_accounts.append(account)
+
             for account_name in session['samlUserdata'].get(account_attribute_name, []):
-                clean_name = ''.join(c for c in account_name.lower() if c in "abcdefghijklmnopqrstuvwxyz0123456789")
-                if len(clean_name) > Account.name.type.length:
-                    logging.error("Account name {0} too long. Truncated.".format(clean_name))
-                account = Account.query.filter_by(name=clean_name).first()
-                if not account:
-                    account = Account(name=clean_name.lower(), description='', contact='', mail='')
-                    account.create_account()
-                    history = History(msg='Account {0} created'.format(account.name), created_by='SAML Assertion')
-                    history.add()
+                account = handle_account(account_name)
                 saml_accounts.append(account)
             saml_accounts = set(saml_accounts)
             for account in saml_accounts - user_accounts:
@@ -277,17 +339,13 @@ def saml_authorized():
                 account.remove_user(user)
                 history = History(msg='Removing {0} from account {1}'.format(user.username, account.name), created_by='SAML Assertion')
                 history.add()
-        if admin_attribute_name:
-          if 'true' in session['samlUserdata'].get(admin_attribute_name, []):
-            admin_role = Role.query.filter_by(name='Administrator').first().id
-            if user.role_id != admin_role:
-                user.role_id = admin_role
-                history = History(msg='Promoting {0} to administrator'.format(user.username), created_by='SAML Assertion')
-                history.add()
-          else:
-            user_role = Role.query.filter_by(name='User').first().id
-            if user.role_id != user_role:
-                user.role_id = user_role
+        if admin_attribute_name and 'true' in session['samlUserdata'].get(admin_attribute_name, []):
+            uplift_to_admin(user)
+        elif admin_group_name in user_groups:
+            uplift_to_admin(user)
+        elif admin_attribute_name or group_attribute_name:
+            if user.role.name != 'User':
+                user.role_id = Role.query.filter_by(name='User').first().id
                 history = History(msg='Demoting {0} to user'.format(user.username), created_by='SAML Assertion')
                 history.add()
         user.plain_text_password = None
@@ -296,11 +354,45 @@ def saml_authorized():
         login_user(user, remember=False)
         return redirect(url_for('index'))
     else:
-        return  render_template('errors/SAML.html', errors=errors)
+        return render_template('errors/SAML.html', errors=errors)
+
+
+def create_group_to_account_mapping():
+    group_to_account_mapping_string = app.config.get('SAML_GROUP_TO_ACCOUNT_MAPPING', None)
+    if group_to_account_mapping_string and len(group_to_account_mapping_string.strip()) > 0:
+        group_to_account_mapping = group_to_account_mapping_string.split(',')
+    else:
+        group_to_account_mapping = []
+    return group_to_account_mapping
+
+
+def handle_account(account_name):
+    clean_name = ''.join(c for c in account_name.lower() if c in "abcdefghijklmnopqrstuvwxyz0123456789")
+    if len(clean_name) > Account.name.type.length:
+        logging.error("Account name {0} too long. Truncated.".format(clean_name))
+    account = Account.query.filter_by(name=clean_name).first()
+    if not account:
+        account = Account(name=clean_name.lower(), description='', contact='', mail='')
+        account.create_account()
+        history = History(msg='Account {0} created'.format(account.name), created_by='SAML Assertion')
+        history.add()
+    return account
+
+
+def uplift_to_admin(user):
+    if user.role.name != 'Administrator':
+        user.role_id = Role.query.filter_by(name='Administrator').first().id
+        history = History(msg='Promoting {0} to administrator'.format(user.username), created_by='SAML Assertion')
+        history.add()
+
+
+@login_manager.unauthorized_handler
+def unauthorized_callback():
+    session['next'] = request.script_root + request.path
+    return redirect(url_for('login'))
 
 
 @app.route('/login', methods=['GET', 'POST'])
-@login_manager.unauthorized_handler
 def login():
     SAML_ENABLED = app.config.get('SAML_ENABLED')
 
@@ -386,65 +478,34 @@ def login():
     if request.method == 'GET':
         return render_template('login.html', saml_enabled=SAML_ENABLED)
 
-    # process login
+    # process Local-DB authentication
     username = request.form['username']
     password = request.form['password']
     otp_token = request.form.get('otptoken')
     auth_method = request.form.get('auth_method', 'LOCAL')
-
-    # addition fields for registration case
-    firstname = request.form.get('firstname')
-    lastname = request.form.get('lastname')
-    email = request.form.get('email')
-    rpassword = request.form.get('rpassword')
-
     session['authentication_type'] = 'LDAP' if auth_method != 'LOCAL' else 'LOCAL'
+    remember_me = True if 'remember' in request.form else False
 
-    if None in [firstname, lastname, email]:
-        #login case
-        remember_me = False
-        if 'remember' in request.form:
-            remember_me = True
+    user = User(username=username, password=password, plain_text_password=password)
 
-        user = User(username=username, password=password, plain_text_password=password)
+    try:
+        auth = user.is_validate(method=auth_method, src_ip=request.remote_addr)
+        if auth == False:
+            return render_template('login.html', saml_enabled=SAML_ENABLED, error='Invalid credentials')
+    except Exception as e:
+        return render_template('login.html', saml_enabled=SAML_ENABLED, error=e)
 
-        try:
-            auth = user.is_validate(method=auth_method, src_ip=request.remote_addr)
-            if auth == False:
+    # check if user enabled OPT authentication
+    if user.otp_secret:
+        if otp_token and otp_token.isdigit():
+            good_token = user.verify_totp(otp_token)
+            if not good_token:
                 return render_template('login.html', saml_enabled=SAML_ENABLED, error='Invalid credentials')
-        except Exception as e:
-            return render_template('login.html', saml_enabled=SAML_ENABLED, error=e)
+        else:
+            return render_template('login.html', saml_enabled=SAML_ENABLED, error='Token required')
 
-        # check if user enabled OPT authentication
-        if user.otp_secret:
-            if otp_token and otp_token.isdigit():
-                good_token = user.verify_totp(otp_token)
-                if not good_token:
-                    return render_template('login.html', saml_enabled=SAML_ENABLED, error='Invalid credentials')
-            else:
-                return render_template('login.html', saml_enabled=SAML_ENABLED, error='Token required')
-
-        login_user(user, remember = remember_me)
-        return redirect(request.args.get('next') or url_for('index'))
-    else:
-        if not username or not password or not email:
-            return render_template('register.html', error='Please input required information')
-
-        # registration case
-        user = User(username=username, plain_text_password=password, firstname=firstname, lastname=lastname, email=email)
-
-        if password != rpassword:
-            error = "Password confirmation does not match"
-            return render_template('register.html', error=error)
-
-        try:
-            result = user.create_local_user()
-            if result and result['status']:
-                return render_template('login.html', saml_enabled=SAML_ENABLED, username=username, password=password)
-            else:
-                return render_template('register.html', error=result['msg'])
-        except Exception as e:
-            return render_template('register.html', error=e)
+    login_user(user, remember=remember_me)
+    return redirect(session.get('next', url_for('index')))
 
 
 def clear_session():
@@ -489,7 +550,89 @@ def saml_logout():
     else:
         return render_template('errors/SAML.html', errors=errors)
 
+# SYBPATCH
+#########################################################
+from app import customBoxes
+from sqlalchemy import not_
 
+@app.route('/dashboard_domains_custom/<path:boxId>', methods=['GET'])
+@login_required
+def dashboard_domains_custom(boxId):
+    if current_user.role.name in ['Administrator', 'Operator']:
+        domains = Domain.query
+    else:
+        domains = User(id=current_user.id).get_domain_query()
+
+    template = app.jinja_env.get_template("dashboard_domain.html")
+    render = template.make_module(vars={"current_user": current_user})
+
+    columns = [Domain.name, Domain.dnssec, Domain.type, Domain.serial, Domain.master, Domain.account]
+    # History.created_on.desc()
+    order_by = []
+    for i in range(len(columns)):
+        column_index = request.args.get("order[{0}][column]".format(i))
+        sort_direction = request.args.get("order[{0}][dir]".format(i))
+        if column_index is None:
+            break
+        if sort_direction != "asc" and sort_direction != "desc":
+            sort_direction = "asc"
+
+        column = columns[int(column_index)]
+        order_by.append(getattr(column, sort_direction)())
+
+    if order_by:
+        domains = domains.order_by(*order_by)
+
+    if boxId == "reverse":
+        for boxId in customBoxes.order:
+            if boxId == "reverse": continue
+            domains = domains.filter(not_(Domain.name.ilike(customBoxes.boxes[boxId][1])))
+    else:
+        domains = domains.filter(Domain.name.ilike(customBoxes.boxes[boxId][1]))
+
+    total_count = domains.count()
+
+    search = request.args.get("search[value]")
+    if search:
+        start = "" if search.startswith("^") else "%"
+        end = "" if search.endswith("$") else "%"
+
+        if current_user.role.name in ['Administrator', 'Operator']:
+            domains = domains.outerjoin(Account).filter(Domain.name.ilike(start + search.strip("^$") + end) |
+                                                        Account.name.ilike(start + search.strip("^$") + end) |
+                                                        Account.description.ilike(start + search.strip("^$") + end))
+        else:
+            domains = domains.filter(Domain.name.ilike(start + search.strip("^$") + end))
+
+    filtered_count = domains.count()
+
+    start = int(request.args.get("start", 0))
+    length = min(int(request.args.get("length", 0)), 100)
+
+    if length != -1:
+        domains = domains[start:start + length]
+
+    data = []
+    for domain in domains:
+        data.append([
+            render.name(domain),
+            render.dnssec(domain),
+            render.type(domain),
+            render.serial(domain),
+            render.master(domain),
+            render.account(domain),
+            render.actions(domain),
+        ])
+
+    response_data = {
+        "draw": int(request.args.get("draw", 0)),
+        "recordsTotal": total_count,
+        "recordsFiltered": filtered_count,
+        "data": data,
+    }
+    return jsonify(response_data)
+
+# add custom boxes
 @app.route('/dashboard', methods=['GET', 'POST'])
 @login_required
 def dashboard():
@@ -515,7 +658,11 @@ def dashboard():
     else:
         uptime = 0
 
-    return render_template('dashboard.html', domain_count=domain_count, users=users, history_number=history_number, uptime=uptime, histories=history, show_bg_domain_button=BG_DOMAIN_UPDATE)
+    # add custom boxes to render_template
+    return render_template('dashboard.html', custom_boxes=customBoxes, domain_count=domain_count, users=users, history_number=history_number, uptime=uptime, histories=history, show_bg_domain_button=BG_DOMAIN_UPDATE)
+
+# SYBPATCH END
+#########################################################
 
 
 @app.route('/dashboard-domains', methods=['GET'])
@@ -621,29 +768,30 @@ def domain(domain_name):
     records_allow_to_edit = Setting().get_records_allow_to_edit()
     forward_records_allow_to_edit = Setting().get_forward_records_allow_to_edit()
     reverse_records_allow_to_edit = Setting().get_reverse_records_allow_to_edit()
+    ttl_options = Setting().get_ttl_options()
     records = []
 
     if StrictVersion(Setting().get('pdns_version')) >= StrictVersion('4.0.0'):
         for jr in jrecords:
             if jr['type'] in records_allow_to_edit:
                 for subrecord in jr['records']:
-                    record = Record(name=jr['name'], type=jr['type'], status='Disabled' if subrecord['disabled'] else 'Active', ttl=jr['ttl'], data=subrecord['content'])
+                    record = RecordEntry(name=jr['name'], type=jr['type'], status='Disabled' if subrecord['disabled'] else 'Active', ttl=jr['ttl'], data=subrecord['content'], is_allowed_edit=True)
                     records.append(record)
         if not re.search('ip6\.arpa|in-addr\.arpa$', domain_name):
             editable_records = forward_records_allow_to_edit
         else:
             editable_records = reverse_records_allow_to_edit
-        return render_template('domain.html', domain=domain, records=records, editable_records=editable_records, quick_edit=quick_edit)
+        return render_template('domain.html', domain=domain, records=records, editable_records=editable_records, quick_edit=quick_edit, ttl_options=ttl_options)
     else:
         for jr in jrecords:
             if jr['type'] in records_allow_to_edit:
-                record = Record(name=jr['name'], type=jr['type'], status='Disabled' if jr['disabled'] else 'Active', ttl=jr['ttl'], data=jr['content'])
+                record = RecordEntry(name=jr['name'], type=jr['type'], status='Disabled' if jr['disabled'] else 'Active', ttl=jr['ttl'], data=jr['content'], is_allowed_edit=True)
                 records.append(record)
     if not re.search('ip6\.arpa|in-addr\.arpa$', domain_name):
         editable_records = forward_records_allow_to_edit
     else:
         editable_records = reverse_records_allow_to_edit
-    return render_template('domain.html', domain=domain, records=records, editable_records=editable_records, quick_edit=quick_edit)
+    return render_template('domain.html', domain=domain, records=records, editable_records=editable_records, quick_edit=quick_edit, ttl_options=ttl_options)
 
 
 @app.route('/admin/domain/add', methods=['GET', 'POST'])
@@ -710,7 +858,7 @@ def domain_add():
         return render_template('domain_add.html', templates=templates, accounts=accounts)
 
 
-@app.route('/admin/domain/<path:domain_name>/delete', methods=['GET'])
+@app.route('/admin/domain/<path:domain_name>/delete', methods=['POST'])
 @login_required
 @operator_role_required
 def domain_delete(domain_name):
@@ -829,7 +977,8 @@ def record_apply(domain_name):
         r = Record()
         result = r.apply(domain_name, submitted_record)
         if result['status'] == 'ok':
-            history = History(msg='Apply record changes to domain {0}'.format(domain_name), detail=str(jdata), created_by=current_user.username)
+            jdata.pop('_csrf_token', None) # don't store csrf token in the history.
+            history = History(msg='Apply record changes to domain {0}'.format(domain_name), detail=str(json.dumps(jdata)), created_by=current_user.username)
             history.add()
             return make_response(jsonify( result ), 200)
         else:
@@ -864,22 +1013,6 @@ def record_update(domain_name):
         return make_response(jsonify( {'status': 'error', 'msg': 'Error when applying new changes'} ), 500)
 
 
-@app.route('/domain/<path:domain_name>/record/<path:record_name>/type/<path:record_type>/delete', methods=['GET'])
-@login_required
-@operator_role_required
-def record_delete(domain_name, record_name, record_type):
-    try:
-        r = Record(name=record_name, type=record_type)
-        result = r.delete(domain=domain_name)
-        if result['status'] == 'error':
-            print(result['msg'])
-    except Exception as e:
-        logging.error('Cannot delete record. Error: {0}'.format(e))
-        logging.debug(traceback.format_exc())
-        return redirect(url_for('error', code=500)), 500
-    return redirect(url_for('domain', domain_name=domain_name))
-
-
 @app.route('/domain/<path:domain_name>/info', methods=['GET'])
 @login_required
 @can_access_domain
@@ -898,7 +1031,7 @@ def domain_dnssec(domain_name):
     return make_response(jsonify(dnssec), 200)
 
 
-@app.route('/domain/<path:domain_name>/dnssec/enable', methods=['GET'])
+@app.route('/domain/<path:domain_name>/dnssec/enable', methods=['POST'])
 @login_required
 @can_access_domain
 @can_configure_dnssec
@@ -908,7 +1041,7 @@ def domain_dnssec_enable(domain_name):
     return make_response(jsonify(dnssec), 200)
 
 
-@app.route('/domain/<path:domain_name>/dnssec/disable', methods=['GET'])
+@app.route('/domain/<path:domain_name>/dnssec/disable', methods=['POST'])
 @login_required
 @can_access_domain
 @can_configure_dnssec
@@ -1075,6 +1208,7 @@ def edit_template(template):
         t = DomainTemplate.query.filter(DomainTemplate.name == template).first()
         records_allow_to_edit = Setting().get_records_allow_to_edit()
         quick_edit = Setting().get('record_quick_edit')
+        ttl_options = Setting().get_ttl_options()
         if t is not None:
             records = []
             for jr in t.records:
@@ -1082,7 +1216,7 @@ def edit_template(template):
                     record = DomainTemplateRecord(name=jr.name, type=jr.type, status='Disabled' if jr.status else 'Active', ttl=jr.ttl, data=jr.data)
                     records.append(record)
 
-            return render_template('template_edit.html', template=t.name, records=records, editable_records=records_allow_to_edit, quick_edit=quick_edit)
+            return render_template('template_edit.html', template=t.name, records=records, editable_records=records_allow_to_edit, quick_edit=quick_edit, ttl_options=ttl_options)
     except Exception as e:
         logging.error('Cannot open domain template page. DETAIL: {0}'.format(e))
         logging.debug(traceback.format_exc())
@@ -1097,7 +1231,7 @@ def apply_records(template):
         jdata = request.json
         records = []
 
-        for j in jdata:
+        for j in jdata['records']:
             name = '@' if j['record_name'] in ['@', ''] else j['record_name']
             type = j['record_type']
             data = j['record_data']
@@ -1110,7 +1244,8 @@ def apply_records(template):
         t = DomainTemplate.query.filter(DomainTemplate.name == template).first()
         result = t.replace_records(records)
         if result['status'] == 'ok':
-            history = History(msg='Apply domain template record changes to domain template {0}'.format(template), detail=str(jdata), created_by=current_user.username)
+            jdata.pop('_csrf_token', None) # don't store csrf token in the history.
+            history = History(msg='Apply domain template record changes to domain template {0}'.format(template), detail=str(json.dumps(jdata)), created_by=current_user.username)
             history.add()
             return make_response(jsonify(result), 200)
         else:
@@ -1121,7 +1256,7 @@ def apply_records(template):
         return make_response(jsonify({'status': 'error', 'msg': 'Error when applying new changes'}), 500)
 
 
-@app.route('/template/<path:template>/delete', methods=['GET'])
+@app.route('/template/<path:template>/delete', methods=['POST'])
 @login_required
 @operator_role_required
 def delete_template(template):
@@ -1171,23 +1306,30 @@ def admin_pdns():
 @login_required
 @operator_role_required
 def admin_edituser(user_username=None):
-    if request.method == 'GET':
-        if not user_username:
-            return render_template('admin_edituser.html', create=1)
+    if user_username:
+        user  = User.query.filter(User.username == user_username).first()
+        create = False
 
-        else:
-            user = User.query.filter(User.username == user_username).first()
-            return render_template('admin_edituser.html', user=user, create=0)
+        if not user:
+            return render_template('errors/404.html'), 404
+
+        if user.role.name == 'Administrator' and current_user.role.name != 'Administrator':
+            return render_template('errors/401.html'), 401
+    else:
+        user = None
+        create = True
+
+    if request.method == 'GET':
+        return render_template('admin_edituser.html', user=user, create=create)
 
     elif request.method == 'POST':
         fdata = request.form
 
-        if not user_username:
+        if create:
             user_username = fdata['username']
 
         user = User(username=user_username, plain_text_password=fdata['password'], firstname=fdata['firstname'], lastname=fdata['lastname'], email=fdata['email'], reload_info=False)
 
-        create = int(fdata['create'])
         if create:
             if fdata['password'] == "":
                 return render_template('admin_edituser.html', user=user, create=create, blank_password=True)
@@ -1350,6 +1492,8 @@ def admin_editaccount(account_name=None):
 def admin_manageaccount():
     if request.method == 'GET':
         accounts = Account.query.order_by(Account.name).all()
+        for account in accounts:
+            account.user_num = AccountUser.query.filter(AccountUser.account_id==account.id).count()
         return render_template('admin_manageaccount.html', accounts=accounts)
 
     if request.method == 'POST':
@@ -1418,7 +1562,8 @@ def admin_setting_basic():
                     'allow_user_create_domain',
                     'bg_domain_updates',
                     'site_name',
-                    'session_timeout' ] 
+                    'session_timeout',
+                    'ttl_options' ]
 
         return render_template('admin_setting_basic.html', settings=settings)
 
@@ -1638,6 +1783,7 @@ def qrcode():
 
 
 @app.route('/nic/checkip.html', methods=['GET', 'POST'])
+@csrf.exempt
 def dyndns_checkip():
     # route covers the default ddclient 'web' setting for the checkip service
     return render_template('dyndns.html', response=request.environ.get('HTTP_X_REAL_IP', request.remote_addr))
@@ -1645,6 +1791,7 @@ def dyndns_checkip():
 
 @app.route('/nic/update', methods=['GET', 'POST'])
 @dyndns_login_required
+@csrf.exempt
 def dyndns_update():
     # dyndns protocol response codes in use are:
     # good: update successful
@@ -1656,6 +1803,11 @@ def dyndns_update():
     # reference: https://help.dyn.com/remote-access-api/return-codes/
     hostname = request.args.get('hostname')
     myip = request.args.get('myip')
+
+    if not hostname:
+        history = History(msg="DynDNS update: missing hostname parameter", created_by=current_user.username)
+        history.add()
+        return render_template('dyndns.html', response='nohost'), 200
 
     try:
         # get all domains owned by the current user
@@ -1680,38 +1832,51 @@ def dyndns_update():
         history.add()
         return render_template('dyndns.html', response='nohost'), 200
 
-    r = Record()
-    r.name = hostname
-    # check if the user requested record exists within this domain
-    if r.exists(domain.name) and r.is_allowed_edit():
-        if r.data == myip:
-            # record content did not change, return 'nochg'
-            history = History(msg="DynDNS update: attempted update of {0} but record did not change".format(hostname), created_by=current_user.username)
-            history.add()
-            return render_template('dyndns.html', response='nochg'), 200
+    myip_addr = []
+    if myip:
+        for address in myip.split(','):
+            myip_addr += utils.validate_ipaddress(address)
+
+    remote_addr = utils.validate_ipaddress(request.headers.get('X-Forwarded-For', request.remote_addr).split(', ')[:1])
+
+    response='nochg'
+    for ip in myip_addr or remote_addr:
+        if isinstance(ip, ipaddress.IPv4Address):
+            rtype='A'
         else:
-            oldip = r.data
-            result = r.update(domain.name, myip)
-            if result['status'] == 'ok':
-                history = History(msg='DynDNS update: updated record {0} in zone {1}, it changed from {2} to {3}'.format(hostname,domain.name,oldip,myip), detail=str(result), created_by=current_user.username)
+            rtype='AAAA'
+
+        r = Record(name=hostname,type=rtype)
+        # check if the user requested record exists within this domain
+        if r.exists(domain.name) and r.is_allowed_edit():
+            if r.data == str(ip):
+                # record content did not change, return 'nochg'
+                history = History(msg="DynDNS update: attempted update of {0} but record did not change".format(hostname), created_by=current_user.username)
                 history.add()
-                return render_template('dyndns.html', response='good'), 200
             else:
-                return render_template('dyndns.html', response='911'), 200
-    elif r.is_allowed_edit():
-        ondemand_creation = DomainSetting.query.filter(DomainSetting.domain == domain).filter(DomainSetting.setting == 'create_via_dyndns').first()
-        if (ondemand_creation != None) and (strtobool(ondemand_creation.value) == True):
-            record = Record(name=hostname,type='A',data=myip,status=False,ttl=3600)
-            result = record.add(domain.name)
-            if result['status'] == 'ok':
-                history = History(msg='DynDNS update: created record {0} in zone {1}, it now represents {2}'.format(hostname,domain.name,myip), detail=str(result), created_by=current_user.username)
-                history.add()
-                return render_template('dyndns.html', response='good'), 200
+                oldip = r.data
+                result = r.update(domain.name, str(ip))
+                if result['status'] == 'ok':
+                    history = History(msg='DynDNS update: updated {0} record {1} in zone {2}, it changed from {3} to {4}'.format(rtype,hostname,domain.name,oldip,str(ip)), detail=str(result), created_by=current_user.username)
+                    history.add()
+                    response='good'
+                else:
+                    response='911'
+                    break
+        elif r.is_allowed_edit():
+            ondemand_creation = DomainSetting.query.filter(DomainSetting.domain == domain).filter(DomainSetting.setting == 'create_via_dyndns').first()
+            if (ondemand_creation is not None) and (strtobool(ondemand_creation.value) == True):
+                record = Record(name=hostname,type=rtype,data=str(ip),status=False,ttl=3600)
+                result = record.add(domain.name)
+                if result['status'] == 'ok':
+                    history = History(msg='DynDNS update: created record {0} in zone {1}, it now represents {2}'.format(hostname,domain.name,str(ip)), detail=str(result), created_by=current_user.username)
+                    history.add()
+                    response='good'
+        else:
+            history = History(msg='DynDNS update: attempted update of {0} but it does not exist for this user'.format(hostname), created_by=current_user.username)
+            history.add()
 
-    history = History(msg='DynDNS update: attempted update of {0} but it does not exist for this user'.format(hostname), created_by=current_user.username)
-    history.add()
-    return render_template('dyndns.html', response='nohost'), 200
-
+    return render_template('dyndns.html', response=response), 200
 
 @app.route('/', methods=['GET', 'POST'])
 @login_required

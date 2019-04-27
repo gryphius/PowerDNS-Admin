@@ -36,6 +36,8 @@
                                 <th>Description</th>
                                 <th>Contact</th>
                                 <th>Mail</th>
+                                <th>Member</th>
+                                <th>Domain</th>
                                 <th>Action</th>
                             </tr>
                         </thead>
@@ -46,6 +48,8 @@
                                 <td>{{ account.description }}</td>
                                 <td>{{ account.contact }}</td>
                                 <td>{{ account.mail }}</td>
+                                <td>{{ account.user_num }}</td>
+                                <td>{{ account.domains|length }}</td>
                                 <td width="15%">
                                     <button type="button" class="btn btn-flat btn-success" onclick="window.location.href='{{ url_for('admin_editaccount', account_name=account.name) }}'">
                                         Edit&nbsp;<i class="fa fa-cog"></i>
@@ -67,7 +71,7 @@
     </div>
     <!-- /.row -->
 </section>
-{% endblock %} 
+{% endblock %}
 {% block extrascripts %}
 <script>
     // set up accounts data table
@@ -90,16 +94,16 @@
     $(document.body).on('click', '.button_delete', function() {
         var modal = $("#modal_delete");
         var accountname = $(this).prop('id');
-        var info = "Are you sure you want to delete " + accountname + "?"; 
+        var info = "Are you sure you want to delete " + accountname + "?";
         modal.find('.modal-body p').text(info);
         modal.find('#button_delete_confirm').click(function() {
-            var postdata = {'action': 'delete_account', 'data': accountname}
+            var postdata = {'action': 'delete_account', 'data': accountname, '_csrf_token': '{{ csrf_token() }}'}
             applyChanges(postdata, $SCRIPT_ROOT + '/admin/manageaccount', false, true);
             modal.modal('hide');
         })
         modal.modal('show');
     });
-    
+
 </script>
 {% endblock %}
 {% block modals %}

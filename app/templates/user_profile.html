@@ -39,6 +39,7 @@
                         <div class="tab-content">
                             <div class="tab-pane active" id="tabs-personal">
                                 <form role="form" method="post" action="{{ user_profile }}">
+                                    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                                     <div class="form-group">
                                         <label for="firstname">First Name</label> <input type="text"
                                             class="form-control" name="firstname" id="firstname"
@@ -62,6 +63,7 @@
                             <div class="tab-pane" id="tabs-avatar">
                                 <form action="{{ user_profile }}" method="post"
                                     enctype="multipart/form-data">
+                                    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                                     <div class="form-group">
                                         <div class="form-group">
                                             <div class="thumbnail" style="width: 200px; height: 210px;">
@@ -95,6 +97,7 @@
                                 Your account password is managed via LDAP which isn't supported to change here.
                                 {% else %}
                                 <form action="{{ user_profile }}" method="post">
+                                    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                                     <div class="form-group">
                                         <label for="password">New Password</label> <input
                                             type="password" class="form-control" name="password" id="newpassword"/>
@@ -113,6 +116,7 @@
                             <!-- {% if session['authentication_type'] in ['LOCAL', 'LDAP'] %} -->
                             <div class="tab-pane" id="tabs-authentication">
                                 <form action="{{ user_profile }}" method="post">
+                                    <input type="hidden" name="_csrf_token" value="{{ csrf_token() }}">
                                     <div class="form-group">
                                         <input type="checkbox" id="otp_toggle" class="otp_toggle" {% if current_user.otp_secret %}checked{% endif %}>
                                         <label for="otp_toggle">Enable Two Factor Authentication</label>
@@ -121,7 +125,7 @@
                                             <p><img id="qrcode" src="{{ url_for('qrcode') }}"></p>
                                             Please start FreeOTP (<a target="_blank" href="https://play.google.com/store/apps/details?id=org.fedorahosted.freeotp&hl=en">Android</a> -  <a target="_blank" href="https://itunes.apple.com/en/app/freeotp-authenticator/id872559395?mt=8">iOS</a>) on your smartphone and scan the above QR Code with it.
                                             <br/>
-                                            <font color="red"><strong><i>Make sure only you can see this QR Code and nobodoy can capture it.</i></strong></font>
+                                            <font color="red"><strong><i>Make sure only you can see this QR Code and nobody can capture it.</i></strong></font>
                                         </div>
                                         {% endif %}
                                     </div>
@@ -165,7 +169,8 @@
             'action' : 'enable_otp',
             'data' : {
                 'enable_otp' : enable_otp
-            }
+            },
+            '_csrf_token': '{{ csrf_token() }}'
         };
         applyChanges(postdata, $SCRIPT_ROOT + '/user/profile', false, true);
     });
